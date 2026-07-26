@@ -100,6 +100,11 @@ static void *bladerf_rx_cb(struct bladerf *dev, struct bladerf_stream *stream,
                             void *samples, size_t num_samples, void *user)
 {
     (void)dev; (void)stream; (void)meta; (void)user;
+    /* bladerf_stream() blocks until a callback returns
+     * BLADERF_STREAM_SHUTDOWN. Without this the stream thread stays
+     * parked in libbladeRF after SIGINT and the shutdown join hangs. */
+    if (!running)
+        return BLADERF_STREAM_SHUTDOWN;
     timeouts = 0;
     int16_t *d = (int16_t *)samples;
 

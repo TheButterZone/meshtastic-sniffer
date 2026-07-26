@@ -88,9 +88,27 @@
 pid_t self_pid;
 pthread_mutex_t fftw_planner_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void on_signal(int sig)
+/* Several backends wake the main loop with kill(self_pid, SIGINT) after
+ * setting running = 0. Those self-raises must not count toward the
+ * force-exit escape hatch below, so the handler checks who sent it:
+ * si_pid == our own pid means the sniffer signalled itself, anything
+ * else (si_pid 0 for a terminal Ctrl-C, or the shell's pid for kill)
+ * is a real operator interrupt. */
+static void on_signal(int sig, siginfo_t *info, void *uctx)
 {
-    (void)sig;
+    (void)sig; (void)uctx;
+    bool self_raised = (info && info->si_pid == self_pid);
+
+    /* Second operator interrupt is an escape hatch. Orderly shutdown has
+     * to join the SDR input thread, and a wedged USB driver can park
+     * that thread somewhere we cannot interrupt -- without this the only
+     * way out is kill -9. One Ctrl-C asks nicely; a second one leaves. */
+    if (!running && !self_raised) {
+        static const char msg[] = "\nsecond interrupt -- exiting now.\n";
+        ssize_t rc = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        (void)rc;
+        _exit(130);
+    }
     running = 0;
 }
 
@@ -4083,8 +4101,15 @@ int main(int argc, char **argv)
     if (rc == 1) return 0;        /* --help */
     if (rc >= 2 && rc != 100 && rc != 101 && rc != 102 && rc != 103 && rc != 104 && rc != 105) return rc;
 
-    signal(SIGINT,  on_signal);
-    signal(SIGTERM, on_signal);
+    /* SA_SIGINFO so the handler can see si_pid and tell an operator
+     * Ctrl-C apart from a backend's own wake-up raise. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_signal;
+    sa.sa_flags     = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
     simd_init(opt_force_simd_generic);

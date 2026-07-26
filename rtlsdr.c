@@ -132,10 +132,16 @@ void *rtlsdr_backend_setup(int dev_index) {
 /* ---- Async streaming callback ---- */
 
 static void rtlsdr_async_cb(unsigned char *buf, uint32_t len, void *ctx) {
-    (void)ctx;
-
-    if (!running)
+    /* rtlsdr_read_async() does not return on its own -- it has to be
+     * broken out of with rtlsdr_cancel_async(). Returning early here on
+     * !running stops the samples but leaves the stream thread parked
+     * inside libusb forever, so the shutdown join never completes.
+     * Cancel from the callback (the librtlsdr-sanctioned way) so the
+     * async read unwinds and the thread can exit. */
+    if (!running) {
+        if (ctx) rtlsdr_cancel_async((rtlsdr_dev_t *)ctx);
         return;
+    }
 
     /* RTL-SDR gives unsigned 8-bit IQ pairs (center at 128).
      * Convert to float and apply DC bias correction (matching
@@ -176,8 +182,14 @@ void *rtlsdr_stream_thread(void *arg) {
     rtlsdr_dev_t *dev = (rtlsdr_dev_t *)arg;
 
     /* Use smaller buffers (16384 bytes = 8192 samples ~3.4ms at 2.4MHz)
-     * to avoid bursty processing from the default 256KB buffers. */
-    rtlsdr_read_async(dev, rtlsdr_async_cb, NULL, 15, 16384);
+     * to avoid bursty processing from the default 256KB buffers.
+     * dev is passed through as the callback ctx so the callback can
+     * cancel the async read once running clears. */
+    rtlsdr_read_async(dev, rtlsdr_async_cb, dev, 15, 16384);
+
+    /* A cancel from the callback leaves the device open; close it here
+     * rather than in rtlsdr_backend_close(), which nothing calls. */
+    rtlsdr_close(dev);
 
     running = 0;
     return NULL;
